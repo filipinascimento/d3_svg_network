@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "d3-svg-network"
+version = "0.1.0"
+description = "Lightweight Mini-D3 style SVG builder with igraph helpers"
+authors = [{name = "Filipi N. Silva"}]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "lxml>=5.0",
+    "cssselect>=1.2",
+    "igraph>=0.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/filipinascimento/d3-svg-network"
+Repository = "https://github.com/filipinascimento/d3-svg-network.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]
