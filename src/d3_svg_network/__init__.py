@@ -1,10 +1,43 @@
 # pip install lxml
 from lxml import etree
 from lxml.cssselect import CSSSelector
-from functools import cmp_to_key
+from cssselect import GenericTranslator
+from functools import cmp_to_key, lru_cache
+import copy
 
 SVG_NS = "http://www.w3.org/2000/svg"
 NSMAP = {None: SVG_NS}
+
+
+class _SVGDefaultNamespaceTranslator(GenericTranslator):
+    """Ensure bare element selectors target the SVG namespace."""
+
+    def __init__(self, default_prefix="svg"):
+        super().__init__()
+        self._default_prefix = default_prefix
+
+    def xpath_element(self, selector):
+        if (
+            self._default_prefix
+            and selector.namespace is None
+            and selector.element is not None
+        ):
+            selector = selector.__class__(self._default_prefix, selector.element)
+        return super().xpath_element(selector)
+
+
+_SVG_NAMESPACE_PREFIX = "svg"
+_SVG_CSS_TRANSLATOR = _SVGDefaultNamespaceTranslator(default_prefix=_SVG_NAMESPACE_PREFIX)
+_SVG_CSS_NAMESPACES = {_SVG_NAMESPACE_PREFIX: SVG_NS}
+
+
+@lru_cache(maxsize=128)
+def _svg_css_selector(css):
+    return CSSSelector(
+        css,
+        translator=_SVG_CSS_TRANSLATOR,
+        namespaces=_SVG_CSS_NAMESPACES,
+    )
 
 def _normalize_attr_name(name):
     """Convert pythonic attr names (text_anchor) into SVG attrs (text-anchor)."""
@@ -184,18 +217,29 @@ class Selection:
 
     def select(self, css):
         """Select first match under each element; returns a Selection of all matches."""
-        sel = CSSSelector(css, translator="xml")
+        sel = _svg_css_selector(css)
         found = []
         for el in self.elements:
-            found.extend(sel(el))
-        return Selection(found[:1])  # mimic d3.select: first match overall
+            matches = sel(el)
+            if not matches:
+                continue
+            match = matches[0]
+            Selection._set_data(match, Selection._get_data(el))
+            found.append(match)
+        return Selection(found)
 
     def select_all(self, css):
         """Select all matches under each element."""
-        sel = CSSSelector(css, translator="xml")
+        sel = _svg_css_selector(css)
         found = []
         for el in self.elements:
-            found.extend(sel(el))
+            matches = sel(el)
+            if not matches:
+                continue
+            parent_data = Selection._get_data(el)
+            for match in matches:
+                Selection._set_data(match, parent_data)
+            found.extend(matches)
         return Selection(found)
 
 class MiniD3SVG:
@@ -225,12 +269,12 @@ class MiniD3SVG:
         return obj
 
     def select(self, css):
-        sel = CSSSelector(css, translator="xml")
+        sel = _svg_css_selector(css)
         found = sel(self.root)
         return Selection(found[:1])
 
     def select_all(self, css):
-        sel = CSSSelector(css, translator="xml")
+        sel = _svg_css_selector(css)
         return Selection(sel(self.root))
 
     def append(self, tag, **attrs):
@@ -283,6 +327,11 @@ class NetworkSVG:
         node_generator=None,
         edge_generator=None,
         label_generator=None,
+        directed_curves=False,
+        directed_curve_factor=1.0,
+        label_font_family="Roboto, Helvetica, Arial, sans-serif",
+        fit_to_view=False,
+        fit_margin=20,
     ):
         try:
             import igraph as ig  # noqa: F401  (type check / guidance)
@@ -290,15 +339,28 @@ class NetworkSVG:
             raise ImportError("NetworkSVG requires python-igraph to be installed")
 
         self.graph = graph
+        self._width = width
+        self._height = height
         self.svg = MiniD3SVG(width=width, height=height, bg=bg)
         self._node_generator = node_generator
         self._edge_generator = edge_generator
         self._label_generator = label_generator
-        self.positions = self._resolve_positions(positions)
+        self._fit_to_view = fit_to_view
+        self._fit_margin = self._normalize_margin(fit_margin)
+        self._original_positions = self._resolve_positions(positions)
+        self.positions = self._fit_positions(self._original_positions)
+        self._directed_curves = directed_curves
+        self._directed_curve_factor = directed_curve_factor
+        self._label_font_family = label_font_family
 
         self._edge_layer = self.svg.append("g", **{"class": "edge-visuals"})
         self._node_layer = self.svg.append("g", **{"class": "node-visuals"})
         self._label_layer = self.svg.append("g", **{"class": "label-visuals"})
+
+        if self._label_font_family:
+            self.add_style(
+                f".label text {{ font-family: {self._label_font_family}; }}"
+            )
 
         self.edges = self._build_edges()
         self.nodes = self._build_nodes()
@@ -309,11 +371,21 @@ class NetworkSVG:
 
     # ------------------------------------------------------------------
     # public API helpers
-    def save(self, path, pretty=True):
-        self.svg.save(path, pretty=pretty)
+    def save(self, path, pretty=True, illustrator_safe=True):
+        svg_text = self.to_string(pretty=pretty, illustrator_safe=illustrator_safe)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg_text)
 
-    def to_string(self, pretty=True):
-        return self.svg.to_string(pretty=pretty)
+    def to_string(self, pretty=True, illustrator_safe=True):
+        root = self._export_root(illustrator_safe)
+        return etree.tostring(root, pretty_print=pretty, encoding="unicode")
+
+    def _export_root(self, illustrator_safe):
+        if not illustrator_safe:
+            return self.svg.root
+        cloned = copy.deepcopy(self.svg.root)
+        _prepare_label_strokes_for_illustrator(cloned)
+        return cloned
 
     def add_style(self, css_text, **attrs):
         return self.svg.add_style(css_text, **attrs)
@@ -371,6 +443,55 @@ class NetworkSVG:
         except ValueError as exc:
             raise ValueError(f"Invalid position for vertex {idx}: {value!r}") from exc
 
+    def _normalize_margin(self, margin):
+        def _to_float(val):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+
+        if isinstance(margin, (int, float)):
+            val = _to_float(margin)
+            return (val, val, val, val)
+        if isinstance(margin, (list, tuple)):
+            if len(margin) == 2:
+                hx, hy = (_to_float(margin[0]), _to_float(margin[1]))
+                return (hx, hx, hy, hy)
+            if len(margin) == 4:
+                left, right, top, bottom = (
+                    _to_float(margin[0]),
+                    _to_float(margin[1]),
+                    _to_float(margin[2]),
+                    _to_float(margin[3]),
+                )
+                return (left, right, top, bottom)
+        # fallback
+        return (20.0, 20.0, 20.0, 20.0)
+
+    def _fit_positions(self, positions):
+        if not self._fit_to_view:
+            return positions
+        left, right, top, bottom = self._fit_margin
+        avail_w = max(self._width - left - right, 1.0)
+        avail_h = max(self._height - top - bottom, 1.0)
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span_x = max(max_x - min_x, 1e-9)
+        span_y = max(max_y - min_y, 1e-9)
+        scale = min(avail_w / span_x, avail_h / span_y)
+        used_w = span_x * scale
+        used_h = span_y * scale
+        extra_x = max(avail_w - used_w, 0.0) / 2.0
+        extra_y = max(avail_h - used_h, 0.0) / 2.0
+        offset_x = left + extra_x - min_x * scale
+        offset_y = top + extra_y - min_y * scale
+        fitted = []
+        for x, y in positions:
+            fitted.append((x * scale + offset_x, y * scale + offset_y))
+        return fitted
+
     # ------------------------------------------------------------------
     def _build_edges(self):
         edge_elements = []
@@ -424,6 +545,21 @@ class NetworkSVG:
         opacity = _as_float(
             _attr_lookup(edge, ["Opacity", "opacity", "alpha"]), default=0.85
         )
+        if (
+            self._directed_curves
+            and hasattr(self.graph, "is_directed")
+            and self.graph.is_directed()
+        ):
+            path_d = self._directed_arc_path((sx, sy), (tx, ty))
+            sel = self._edge_layer.append(
+                "path",
+                d=path_d,
+                fill="none",
+                stroke=stroke,
+                stroke_width=width,
+                opacity=opacity,
+            )
+            return sel.elements[0]
         sel = self._edge_layer.append(
             "line",
             x1=sx,
@@ -452,6 +588,21 @@ class NetworkSVG:
             if weight is not None:
                 width = 1.0 + 0.5 * _as_float(weight, 0)
         return _as_float(width, 1.0)
+
+    def _directed_arc_path(self, start, end):
+        sx, sy = start
+        tx, ty = end
+        dx = tx - sx
+        dy = ty - sy
+        dist = (dx ** 2 + dy ** 2) ** 0.5
+        factor = max(self._directed_curve_factor, 0.51)
+        radius = max(dist * factor, 1.0)
+        large_arc = 0
+        sweep = 1
+        return (
+            f"M {sx:.3f} {sy:.3f} "
+            f"A {radius:.3f} {radius:.3f} 0 {large_arc} {sweep} {tx:.3f} {ty:.3f}"
+        )
 
     def _create_node_element(self, vertex, idx):
         x, y = self.positions[idx]
@@ -505,11 +656,14 @@ class NetworkSVG:
         )
         text_attrs = {
             "text_anchor": "middle",
-            "alignment_baseline": "middle",
+            "dy": "0.35em",
             "fill": text_fill,
             "stroke": stroke,
             "stroke_width": stroke_width,
             "paint_order": "stroke fill",
+            "stroke_linecap": "round",
+            "stroke_linejoin": "round",
+            "stroke_miterlimit": 1,
         }
         if font_size:
             text_attrs["font_size"] = font_size
@@ -671,3 +825,36 @@ def scale_linear(domain=(0.0, 1.0), range_=(0.0, 1.0)):
 
 def scale_ordinal(domain=None, range_=None):
     return OrdinalScale(domain, range_)
+
+
+def _prepare_label_strokes_for_illustrator(root):
+    """Duplicate label text nodes so Illustrator shows stroke underneath fill."""
+    ns = {"svg": SVG_NS}
+    label_groups = root.xpath(
+        ".//svg:g[contains(concat(' ', normalize-space(@class), ' '), ' label ')]",
+        namespaces=ns,
+    )
+    text_tag = f"{{{SVG_NS}}}text"
+    for group in label_groups:
+        texts = [child for child in list(group) if child.tag == text_tag]
+        for text in texts:
+            stroke = text.get("stroke")
+            if not stroke:
+                continue
+            stroke_width = text.get("stroke-width")
+            if stroke_width is not None:
+                try:
+                    if float(stroke_width) == 0.0:
+                        continue
+                except ValueError:
+                    pass
+            bg = copy.deepcopy(text)
+            bg.set("fill", "none")
+            bg.attrib.pop("paint-order", None)
+            # keep stroke attributes on bg, remove from foreground
+            for attr in list(text.attrib.keys()):
+                if attr.startswith("stroke"):
+                    bg.set(attr, text.get(attr))
+                    del text.attrib[attr]
+            text.attrib.pop("paint-order", None)
+            group.insert(group.index(text), bg)

@@ -12,8 +12,8 @@ def main():
     g.vs["Label"] = [f"Node {i}" for i in range(g.vcount())]
     g.es["weight"] = list(range(1, g.ecount() + 1))
 
-    net = NetworkSVG(g, width=500, height=150, bg="#fff")
-    net.set_text_style(font_family="'Source Sans Pro'", font_size="11px")
+    net = NetworkSVG(g, width=500, height=150, bg="#fff", fit_to_view=True, fit_margin=20)
+    net.set_text_style(font_family="'Helvetica'", font_size="11px")
 
     degree_scale = scale_linear(domain=(0, max(g.degree())), range_=(6, 22))
     net.nodes.select_all("circle").attr(

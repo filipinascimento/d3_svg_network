@@ -98,6 +98,10 @@ net.save("network.svg")
 
 If none exist, it raises an error asking you to supply coordinates.
 
+### Fitting To The Viewport
+
+Pass `fit_to_view=True` when constructing `NetworkSVG` to automatically scale and translate all node coordinates so the entire network fits inside the SVG canvas while preserving aspect ratio. Control the padding via `fit_margin` (scalar for all sides, or `(horizontal, vertical)` tuples). The original coordinates remain available through `net._original_positions`; `net.positions` contains the fitted values used for rendering.
+
 ### Default Styling Logic
 
 - Nodes render as `<g class="node">` translated to their positions with an inner `<circle>`.
@@ -110,13 +114,15 @@ If none exist, it raises an error asking you to supply coordinates.
   - Set `UseSourceColor`/`UseTargetColor` to color edges based on an endpoint.
   - `Width`/`width`/`stroke_width` sets thickness; otherwise it grows with `weight` if present.
   - Pass a `edge_generator=edge_fn` callable when constructing `NetworkSVG` to emit custom shapes (arc paths, bundles, etc.). Generators receive `(edge, (x1,y1), (x2,y2))` and return either a `Selection`, `(tag, attrs)` tuple, a `{ "tag": ..., "attrs": ..., "children": [...] }` dict, or a raw `lxml` element.
+  - For directed graphs, set `directed_curves=True` when creating `NetworkSVG` to draw clockwise arc paths instead of straight lines (uses SVG `<path>` with `A` commands). Adjust `directed_curve_factor` to control curvature.
 
 ### Label Layer
 
 - Labels live in their own `<g class="label-visuals">` appended after nodes so they always sit on top.
-- By default, each node with a non-empty `Label`/`label`/`name` attribute (and without `show_label=False`) gets `<g class="label">` containing centered `<text>`.
-- Label fill defaults to white when the node has a color, with a darker stroke (`paint-order: stroke fill`) so text stays readable.
+- By default, each node with a non-empty `Label`/`label`/`name` attribute (and without `show_label=False`) gets `<g class="label">` containing centered `<text>` (`text-anchor: middle`, `dy="0.35em"` compensation, rounded stroke joins/caps). A stylesheet block defines the default font stack (`Roboto, Helvetica, Arial, sans-serif`); override via `label_font_family="Your Font"` or by injecting your own `.label text { ... }` rule.
+- Label fill defaults to white when the node has a color, with a darker stroke (`paint-order: stroke fill`, `stroke-linecap: round`) so text stays readable.
 - Provide `LabelSize`, `label_size`, `LabelOutline`, or a custom `label_generator` callable to override the defaults entirely.
+- Configure the default label font stack via `label_font_family="...'"` when constructing `NetworkSVG` (set to `None` to skip the injected style rule).
 
 Access the layer via `net.labels`:
 
@@ -137,6 +143,9 @@ net.sort_labels(cmp=lambda a, b: len(a["Label"]) - len(b["Label"]))
 Each sorter accepts either `by="attribute"`, a `key` function, or a comparator `cmp`, plus `reverse=True/False`.
 
 ### Global Styles / Fonts
+### Directed Curves (optional)
+
+When your graph is directed, construct `NetworkSVG(..., directed_curves=True)` to render each edge as a clockwise arc instead of a straight `<line>`. The helper uses SVG arc paths (`<path d="M ... A ...">`) so arrowheads or other markers will follow the curve naturally. Use `directed_curve_factor` (default `1.0`) to tweak how far the arc bows outward; bigger values mean gentler curves.
 
 Add SVG-wide styles once and keep individual groups clean:
 
@@ -164,6 +173,7 @@ net.nodes.select_all("circle").style(fill=lambda node, *_: category(node["commun
 ## Saving and Inspecting
 
 - `MiniD3SVG.save("out.svg")` or `NetworkSVG.save(...)` write prettified SVG.
+- `NetworkSVG.save(..., illustrator_safe=True)` (the default) clones each label’s text so the stroke and fill render correctly in Illustrator. Pass `illustrator_safe=False` if you prefer the more compact single-text output.
 - `to_string(pretty=False)` returns a raw string when you want to embed the markup directly.
 
 ## Troubleshooting
@@ -176,5 +186,5 @@ Feel free to extend `d3_svg_network` with additional helpers (e.g., curved-edge 
 
 ## Examples & Tests
 
-- Run the sample scripts in `examples/` for quick demos: `python examples/basic_svg.py` and `python examples/network_svg.py`.
+- Run the sample scripts in `examples/` for quick demos: `python examples/basic_svg.py`, `python examples/network_svg.py`, and `python examples/network_svg_curved.py`.
 - Execute `python -m pytest` (with the `networks` Conda env or your own virtualenv) to run the unit tests in `tests/`.
