@@ -25,6 +25,10 @@ def main():
         lambda edge, *_: "#d62728" if edge["weight"] >= 4 else "#999999",
     )
 
+    # Uncomment one of the helpers below to color edges from node colors:
+    # net.enable_edge_average_color()
+    # net.enable_edge_color_gradient()
+
     net.labels.select_all("text").attrs(font_weight="600")
 
     net.save("network.svg")

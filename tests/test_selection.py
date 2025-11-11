@@ -63,6 +63,43 @@ def test_select_all_applies_attrs_with_svg_namespace():
     assert all(text.get("stroke-width") == "4" for text in texts.elements)
 
 
+def test_enable_edge_average_color_uses_node_colors():
+    g = ig.Graph.Ring(2)
+    g.vs["Position"] = [(0.0, 0.0), (50.0, 0.0)]
+    g.vs["Color"] = ["#000000", "#ffffff"]
+    net = NetworkSVG(g, width=120, height=60)
+
+    net.enable_edge_average_color()
+
+    assert net.edges.elements
+    for edge_el in net.edges.elements:
+        assert edge_el.get("stroke") == "#808080"
+
+
+def test_enable_edge_color_gradient_adds_linear_gradient():
+    g = ig.Graph.Ring(2)
+    g.vs["Position"] = [(0.0, 0.0), (100.0, 0.0)]
+    g.vs["Color"] = ["#000000", "#00ff00"]
+    net = NetworkSVG(g, width=160, height=80)
+
+    net.enable_edge_color_gradient()
+
+    first_edge = net.edges.elements[0]
+    stroke = first_edge.get("stroke")
+    assert stroke.startswith("url(#edge-gradient-")
+
+    svg = net.to_string(pretty=False, illustrator_safe=False)
+    root = etree.fromstring(svg.encode("utf-8"))
+    gradients = root.findall(f".//{{{SVG_NS}}}linearGradient")
+    assert gradients
+    gradient = gradients[0]
+    assert gradient.get("gradientUnits") == "userSpaceOnUse"
+    stops = gradient.findall(f"{{{SVG_NS}}}stop")
+    assert len(stops) == 2
+    assert stops[0].get("stop-color") == "#000000"
+    assert stops[1].get("stop-color") == "#00ff00"
+
+
 def test_illustrator_safe_labels_duplicate_text():
     g = ig.Graph.Ring(3)
     g.vs["Position"] = [(i * 40.0, 20.0) for i in range(g.vcount())]

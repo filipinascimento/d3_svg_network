@@ -83,6 +83,11 @@ net.edges.attr(
     lambda edge, *_: "#d62728" if edge["weight"] >= 4 else "#999999",
 )
 
+# Optional helpers let edges inherit node colors:
+net.enable_edge_average_color()            # solid stroke midway between source/target fills
+# or:
+net.enable_edge_color_gradient()           # gradient stroke from source to target
+
 # keep labels above nodes
 net.labels.select_all("text").attr("font_size", 12)
 
@@ -114,7 +119,7 @@ Pass `fit_to_view=True` when constructing `NetworkSVG` to automatically scale an
   - Set `UseSourceColor`/`UseTargetColor` to color edges based on an endpoint.
   - `Width`/`width`/`stroke_width` sets thickness; otherwise it grows with `weight` if present.
   - Pass a `edge_generator=edge_fn` callable when constructing `NetworkSVG` to emit custom shapes (arc paths, bundles, etc.). Generators receive `(edge, (x1,y1), (x2,y2))` and return either a `Selection`, `(tag, attrs)` tuple, a `{ "tag": ..., "attrs": ..., "children": [...] }` dict, or a raw `lxml` element.
-  - For directed graphs, set `directed_curves=True` when creating `NetworkSVG` to draw clockwise arc paths instead of straight lines (uses SVG `<path>` with `A` commands). Adjust `directed_curve_factor` to control curvature.
+  - For directed graphs, set `directed_curves=True` when creating `NetworkSVG` to draw clockwise arc paths instead of straight lines (uses SVG `<path>` with `A` commands). By default, curvature follows Gephi’s preview heuristic: `radius = edge_length / directed_curve_factor`.
 
 ### Label Layer
 
@@ -145,7 +150,9 @@ Each sorter accepts either `by="attribute"`, a `key` function, or a comparator `
 ### Global Styles / Fonts
 ### Directed Curves (optional)
 
-When your graph is directed, construct `NetworkSVG(..., directed_curves=True)` to render each edge as a clockwise arc instead of a straight `<line>`. The helper uses SVG arc paths (`<path d="M ... A ...">`) so arrowheads or other markers will follow the curve naturally. Use `directed_curve_factor` (default `1.0`) to tweak how far the arc bows outward; bigger values mean gentler curves.
+When your graph is directed, construct `NetworkSVG(..., directed_curves=True)` to render each edge as a clockwise arc instead of a straight `<line>`. The helper uses SVG arc paths (`<path d="M ... A ...">`) so arrowheads or other markers will follow the curve naturally. Curvature matches Gephi’s renderer: each edge gets `radius = edge_length / directed_curve_factor` (akin to the `ARC_CURVENESS` slider), so higher factors bend more aggressively.
+
+Need a different rule? Call `net.set_directed_curve_radius_resolver(resolver)` with a custom `(edge, length, default_radius)` resolver or `net.use_edge_attribute_for_curve_radius("CurveRadius")` to read per-edge values while retaining sensible fallbacks.
 
 Add SVG-wide styles once and keep individual groups clean:
 

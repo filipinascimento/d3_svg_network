@@ -298,6 +298,18 @@ class MiniD3SVG:
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.to_string(pretty=pretty))
 
+    def defs(self):
+        """Ensure a <defs> node exists and return it as a Selection."""
+        if self._defs is None:
+            defs = _el("defs")
+            insert_at = 0
+            for idx, child in enumerate(self.root):
+                if child.tag == f"{{{SVG_NS}}}style":
+                    insert_at = idx + 1
+            self.root.insert(insert_at, defs)
+            self._defs = defs
+        return Selection([self._defs])
+
 
 class NetworkSVG:
     """Convenience helper that renders igraph.Graph data into SVG primitives.
@@ -329,7 +341,7 @@ class NetworkSVG:
         label_generator=None,
         directed_curves=False,
         directed_curve_factor=1.0,
-        label_font_family="Roboto, Helvetica, Arial, sans-serif",
+        label_font_family="\"Roboto Flex\", Roboto, Helvetica, Arial, sans-serif",
         fit_to_view=False,
         fit_margin=20,
     ):
@@ -351,7 +363,10 @@ class NetworkSVG:
         self.positions = self._fit_positions(self._original_positions)
         self._directed_curves = directed_curves
         self._directed_curve_factor = directed_curve_factor
+        self._directed_curve_radius_resolver = None
         self._label_font_family = label_font_family
+        self._edge_color_mode = "default"
+        self._edge_gradient_cache = {}
 
         self._edge_layer = self.svg.append("g", **{"class": "edge-visuals"})
         self._node_layer = self.svg.append("g", **{"class": "node-visuals"})
@@ -400,6 +415,80 @@ class NetworkSVG:
             return None
         css = f"{selector} {{{declarations};}}"
         return self.add_style(css)
+
+    def enable_edge_color_gradient(self):
+        """Color edges using linear gradients between source/target node colors."""
+        self._edge_color_mode = "gradient"
+        self._refresh_edge_colors()
+        return self
+
+    def enable_edge_average_color(self):
+        """Color edges with the average of the source/target node colors."""
+        self._edge_color_mode = "average"
+        self._refresh_edge_colors()
+        return self
+
+    def disable_edge_color_overrides(self):
+        """Restore default edge coloring logic."""
+        self._edge_color_mode = "default"
+        self._refresh_edge_colors()
+        return self
+
+    def set_directed_curve_radius_resolver(self, resolver):
+        """Override how arc radii are computed for directed curved edges.
+
+        Parameters
+        ----------
+        resolver : callable or None
+            Callable accepting ``(edge, length, default_radius)`` and returning a
+            positive radius in SVG units. Pass ``None`` to restore the default
+            Gephi-style heuristic ``length / directed_curve_factor``.
+        """
+
+        self._directed_curve_radius_resolver = resolver
+        self._update_directed_curve_paths()
+        return self
+
+    def use_edge_attribute_for_curve_radius(
+        self, attr_name, transform=None, fallback=None
+    ):
+        """Use an edge attribute (optionally transformed) to set arc radii.
+
+        Parameters
+        ----------
+        attr_name : str or sequence[str]
+            Name (or list of fallback names) of the edge attribute that stores a
+            radius value.
+        transform : callable, optional
+            Function ``f(value, edge, length, default_radius)`` used to convert
+            the attribute into a radius when present.
+        fallback : float or callable, optional
+            Value (or callable ``f(edge, length, default_radius)``) to use when
+            the attribute is missing. Defaults to the standard Gephi heuristic.
+        """
+
+        if isinstance(attr_name, (list, tuple, set)):
+            names = list(attr_name)
+        else:
+            names = [attr_name]
+
+        def resolver(edge, length, default_radius):
+            value = _attr_lookup(edge, names)
+            if value is None:
+                if fallback is None:
+                    return default_radius
+                if callable(fallback):
+                    value = fallback(edge, length, default_radius)
+                else:
+                    value = fallback
+            if transform and value is not None:
+                value = transform(value, edge, length, default_radius)
+            radius = _as_float(value)
+            if radius is None or radius <= 0:
+                return default_radius
+            return radius
+
+        return self.set_directed_curve_radius_resolver(resolver)
 
     # ------------------------------------------------------------------
     def _resolve_positions(self, provided):
@@ -540,7 +629,7 @@ class NetworkSVG:
             spec = self._edge_generator(edge, (sx, sy), (tx, ty))
             return self._materialize(self._edge_layer, spec)
 
-        stroke = self._edge_color(edge, src, tgt)
+        stroke = self._edge_color(edge, src, tgt, (sx, sy), (tx, ty))
         width = self._edge_width(edge)
         opacity = _as_float(
             _attr_lookup(edge, ["Opacity", "opacity", "alpha"]), default=0.85
@@ -550,7 +639,7 @@ class NetworkSVG:
             and hasattr(self.graph, "is_directed")
             and self.graph.is_directed()
         ):
-            path_d = self._directed_arc_path((sx, sy), (tx, ty))
+            path_d = self._directed_arc_path(edge, (sx, sy), (tx, ty))
             sel = self._edge_layer.append(
                 "path",
                 d=path_d,
@@ -572,14 +661,74 @@ class NetworkSVG:
         )
         return sel.elements[0]
 
-    def _edge_color(self, edge, src_idx, tgt_idx):
+    def _edge_color(self, edge, src_idx, tgt_idx, start=None, end=None):
         color = _attr_lookup(edge, ["Color", "color", "stroke"])
         use_source = _as_bool(_attr_lookup(edge, ["UseSourceColor", "use_source_color"]))
         use_target = _as_bool(_attr_lookup(edge, ["UseTargetColor", "use_target_color"]))
         if not color and (use_source or use_target):
             node_idx = src_idx if use_source else tgt_idx
             color = self._node_fill(self.graph.vs[node_idx])
-        return color or "#999999"
+        base_color = color or "#999999"
+        if self._edge_color_mode == "gradient" and start and end:
+            gradient = self._edge_gradient_stroke(edge, src_idx, tgt_idx, start, end)
+            if gradient:
+                return gradient
+        if self._edge_color_mode == "average":
+            avg = self._edge_average_color(src_idx, tgt_idx)
+            if avg:
+                return avg
+        return base_color
+
+    def _edge_gradient_stroke(self, edge, src_idx, tgt_idx, start, end):
+        source_color = self._node_fill(self.graph.vs[src_idx])
+        target_color = self._node_fill(self.graph.vs[tgt_idx])
+        if not source_color or not target_color:
+            return None
+        gradient_id = f"edge-gradient-{edge.index}"
+        gradient_el = self._edge_gradient_cache.get(edge.index)
+        if gradient_el is None:
+            gradient_sel = self.svg.defs().append(
+                "linearGradient",
+                id=gradient_id,
+                **{"gradientUnits": "userSpaceOnUse"},
+            )
+            gradient_el = gradient_sel.elements[0]
+            self._edge_gradient_cache[edge.index] = gradient_el
+        gradient_el.set("id", gradient_id)
+        gradient_el.set("x1", f"{start[0]}")
+        gradient_el.set("y1", f"{start[1]}")
+        gradient_el.set("x2", f"{end[0]}")
+        gradient_el.set("y2", f"{end[1]}")
+        # replace stops
+        gradient_el[:] = []
+        stop_start = _el("stop", offset="0%", stop_color=source_color)
+        stop_end = _el("stop", offset="100%", stop_color=target_color)
+        gradient_el.append(stop_start)
+        gradient_el.append(stop_end)
+        return f"url(#{gradient_id})"
+
+    def _edge_average_color(self, src_idx, tgt_idx):
+        source_color = self._node_fill(self.graph.vs[src_idx])
+        target_color = self._node_fill(self.graph.vs[tgt_idx])
+        comps_a = _hex_components(source_color)
+        comps_b = _hex_components(target_color)
+        if not comps_a or not comps_b:
+            return None
+        avg = tuple(int(round((a + b) / 2.0)) for a, b in zip(comps_a, comps_b))
+        return "#%02x%02x%02x" % avg
+
+    def _refresh_edge_colors(self):
+        if not self.edges.elements:
+            return
+        for el in self.edges.elements:
+            edge = Selection._get_data(el)
+            if edge is None:
+                continue
+            sx, sy = self.positions[edge.source]
+            tx, ty = self.positions[edge.target]
+            stroke = self._edge_color(edge, edge.source, edge.target, (sx, sy), (tx, ty))
+            if stroke:
+                el.set("stroke", stroke)
 
     def _edge_width(self, edge):
         width = _attr_lookup(edge, ["Width", "width", "stroke_width"])
@@ -589,20 +738,56 @@ class NetworkSVG:
                 width = 1.0 + 0.5 * _as_float(weight, 0)
         return _as_float(width, 1.0)
 
-    def _directed_arc_path(self, start, end):
+    def _update_directed_curve_paths(self):
+        if not (
+            self._directed_curves
+            and hasattr(self.graph, "is_directed")
+            and self.graph.is_directed()
+        ):
+            return
+        if not self.edges.elements:
+            return
+        for el in self.edges.elements:
+            if el.tag != f"{{{SVG_NS}}}path":
+                continue
+            edge = Selection._get_data(el)
+            if edge is None:
+                continue
+            sx, sy = self.positions[edge.source]
+            tx, ty = self.positions[edge.target]
+            el.set("d", self._directed_arc_path(edge, (sx, sy), (tx, ty)))
+
+    def _directed_arc_path(self, edge, start, end):
         sx, sy = start
         tx, ty = end
         dx = tx - sx
         dy = ty - sy
         dist = (dx ** 2 + dy ** 2) ** 0.5
-        factor = max(self._directed_curve_factor, 0.51)
-        radius = max(dist * factor, 1.0)
+        length = max(dist, 1e-6)
+        radius = self._resolve_curve_radius(edge, length)
         large_arc = 0
         sweep = 1
         return (
             f"M {sx:.3f} {sy:.3f} "
             f"A {radius:.3f} {radius:.3f} 0 {large_arc} {sweep} {tx:.3f} {ty:.3f}"
         )
+
+    def _resolve_curve_radius(self, edge, length):
+        default_radius = self._gephi_curve_radius(length)
+        resolver = self._directed_curve_radius_resolver
+        if resolver is None:
+            return default_radius
+        radius = resolver(edge, length, default_radius)
+        radius = _as_float(radius, default_radius)
+        if radius is None or radius <= 0:
+            return default_radius
+        return radius
+
+    def _gephi_curve_radius(self, length):
+        curveness = _as_float(self._directed_curve_factor, 1.0)
+        if curveness is None or curveness <= 0:
+            curveness = 1.0
+        return max(length / curveness, 1.0)
 
     def _create_node_element(self, vertex, idx):
         x, y = self.positions[idx]
