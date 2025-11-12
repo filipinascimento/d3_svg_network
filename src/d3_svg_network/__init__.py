@@ -367,15 +367,15 @@ class NetworkSVG:
         self._label_font_family = label_font_family
         self._edge_color_mode = "default"
         self._edge_gradient_cache = {}
+        self._text_style_rules = {}
+        self._text_style_element = None
 
         self._edge_layer = self.svg.append("g", **{"class": "edge-visuals"})
         self._node_layer = self.svg.append("g", **{"class": "node-visuals"})
         self._label_layer = self.svg.append("g", **{"class": "label-visuals"})
 
         if self._label_font_family:
-            self.add_style(
-                f".label text {{ font-family: {self._label_font_family}; }}"
-            )
+            self.set_text_style(font_family=self._label_font_family)
 
         self.edges = self._build_edges()
         self.nodes = self._build_nodes()
@@ -405,16 +405,39 @@ class NetworkSVG:
     def add_style(self, css_text, **attrs):
         return self.svg.add_style(css_text, **attrs)
 
-    def set_text_style(self, selector="text", **properties):
+    def set_text_style(self, selector=".label text", **properties):
         if not properties:
             return None
-        declarations = "; ".join(
-            f"{_normalize_attr_name(k)}: {v}" for k, v in properties.items() if v is not None
-        )
-        if not declarations:
+        cleaned = {}
+        for key, value in properties.items():
+            if value is None:
+                continue
+            cleaned[_normalize_attr_name(key)] = str(value)
+        if not cleaned:
             return None
-        css = f"{selector} {{{declarations};}}"
-        return self.add_style(css)
+        rule = self._text_style_rules.setdefault(selector, {})
+        rule.update(cleaned)
+        style_el = self._ensure_text_style_element()
+        style_el.text = self._render_text_style_css()
+        return Selection([style_el])
+
+    def _ensure_text_style_element(self):
+        if self._text_style_element is None:
+            selection = self.svg.add_style(
+                "",
+                data_networksvg_role="text-style",
+            )
+            self._text_style_element = selection.elements[0]
+        return self._text_style_element
+
+    def _render_text_style_css(self):
+        rules = []
+        for selector, props in self._text_style_rules.items():
+            if not props:
+                continue
+            declarations = "; ".join(f"{name}: {value}" for name, value in props.items())
+            rules.append(f"{selector} {{{declarations};}}")
+        return "\n".join(rules)
 
     def enable_edge_color_gradient(self):
         """Color edges using linear gradients between source/target node colors."""
