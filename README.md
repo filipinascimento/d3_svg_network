@@ -7,8 +7,10 @@ The `d3_svg_network` package gives you a lightweight, Pythonic subset of D3’s 
 Install the package (and its minimal dependencies):
 
 ```bash
-pip install d3-svg-network
+pip install git+https://github.com/filipinascimento/d3_svg_network.git
 ```
+
+Note: The package will be available via PyPI in the near future.
 
 All examples below assume `import d3_svg_network as d3`.
 
